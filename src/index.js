@@ -1,14 +1,224 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 
-export class JobMemory {
+export default {
+	async fetch(request, env) {
+		const url = new URL(request.url);
+
+		try {
+			if (url.pathname === '/api/chat' && request.method === 'POST') {
+				return handleChat(request, env);
+			}
+
+			if (url.pathname === '/api/history' && request.method === 'GET') {
+				return handleHistory(request, env);
+			}
+
+			if (url.pathname === '/api/clear' && request.method === 'POST') {
+				return handleClear(request, env);
+			}
+
+			if (url.pathname === '/api/health' && request.method === 'GET') {
+				return json({
+					ok: true,
+					app: 'JobFit AI',
+				});
+			}
+
+			// Serve static frontend from ./public through the ASSETS binding.
+			return env.ASSETS.fetch(request);
+		} catch (error) {
+			console.error('Worker error:', error);
+
+			return json(
+				{
+					error: 'Internal server error',
+					message: error.message,
+				},
+				500,
+			);
+		}
+	},
+};
+
+async function handleChat(request, env) {
+	const body = await request.json().catch(() => null);
+
+	if (!body) {
+		return json({ error: 'Invalid JSON body' }, 400);
+	}
+
+	const sessionId = body.sessionId || 'default';
+	const userMessage = body.message;
+
+	if (!userMessage || typeof userMessage !== 'string') {
+		return json({ error: 'message is required' }, 400);
+	}
+
+	const session = getSessionObject(env, sessionId);
+
+	// Save the user's message first.
+	await session.fetch('https://jobfit-session/add-message', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			role: 'user',
+			content: userMessage,
+		}),
+	});
+
+	// Read session memory.
+	const historyResponse = await session.fetch('https://jobfit-session/history');
+	const historyData = await historyResponse.json();
+	const messages = historyData.messages || [];
+
+	const aiMessages = buildAIMessages(messages);
+
+	const aiResult = await env.AI.run(MODEL, {
+		messages: aiMessages,
+		max_tokens: 900,
+	});
+
+	const assistantReply = extractAIText(aiResult);
+
+	// Save assistant reply into Durable Object memory.
+	await session.fetch('https://jobfit-session/add-message', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			role: 'assistant',
+			content: assistantReply,
+		}),
+	});
+
+	return json({
+		sessionId,
+		reply: assistantReply,
+	});
+}
+
+async function handleHistory(request, env) {
+	const url = new URL(request.url);
+	const sessionId = url.searchParams.get('sessionId') || 'default';
+
+	const session = getSessionObject(env, sessionId);
+
+	const response = await session.fetch('https://jobfit-session/history');
+	const data = await response.json();
+
+	return json(data);
+}
+
+async function handleClear(request, env) {
+	const body = await request.json().catch(() => ({}));
+	const sessionId = body.sessionId || 'default';
+
+	const session = getSessionObject(env, sessionId);
+
+	await session.fetch('https://jobfit-session/clear', {
+		method: 'POST',
+	});
+
+	return json({
+		ok: true,
+		message: 'Session cleared',
+	});
+}
+
+function getSessionObject(env, sessionId) {
+	const durableObjectId = env.CHAT_SESSIONS.idFromName(sessionId);
+	return env.CHAT_SESSIONS.get(durableObjectId);
+}
+
+function buildAIMessages(messages) {
+	const systemPrompt = `
+You are JobFit AI, an AI-powered job application coach.
+
+Your goal:
+Help candidates tailor job applications, recruiter messages, interview answers, and resume bullets.
+
+You can help with:
+- Understanding job descriptions
+- Extracting key role requirements
+- Matching user experience to a role
+- Drafting application answers
+- Improving recruiter DMs and emails
+- Preparing concise interview responses
+- Rewriting resume bullets with measurable impact
+
+Rules:
+- Do not invent experience.
+- Use only details the user has provided in the conversation.
+- If important information is missing, ask one short follow-up question.
+- Prefer concise, practical, polished responses.
+- For application answers, sound confident but not exaggerated.
+- When useful, include a stronger revised version and a brief reason why it works.
+`;
+
+	const recentMessages = messages
+		.slice(-16)
+		.filter((message) => {
+			return (
+				message && typeof message.role === 'string' && typeof message.content === 'string' && ['user', 'assistant'].includes(message.role)
+			);
+		})
+		.map((message) => ({
+			role: message.role,
+			content: message.content,
+		}));
+
+	return [
+		{
+			role: 'system',
+			content: systemPrompt,
+		},
+		...recentMessages,
+	];
+}
+
+function extractAIText(aiResult) {
+	if (!aiResult) {
+		return 'I could not generate a response.';
+	}
+
+	if (typeof aiResult.response === 'string') {
+		return aiResult.response;
+	}
+
+	if (typeof aiResult.result?.response === 'string') {
+		return aiResult.result.response;
+	}
+
+	if (typeof aiResult.output_text === 'string') {
+		return aiResult.output_text;
+	}
+
+	if (Array.isArray(aiResult.result?.content)) {
+		return aiResult.result.content
+			.map((item) => item.text || '')
+			.join('')
+			.trim();
+	}
+
+	return 'I could not generate a response.';
+}
+
+function json(data, status = 200) {
+	return new Response(JSON.stringify(data, null, 2), {
+		status,
+		headers: {
+			'Content-Type': 'application/json',
+			'Access-Control-Allow-Origin': '*',
+			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+			'Access-Control-Allow-Headers': 'Content-Type',
+		},
+	});
+}
+
+export class ChatSession {
 	constructor(state, env) {
 		this.state = state;
 		this.env = env;
@@ -17,177 +227,79 @@ export class JobMemory {
 	async fetch(request) {
 		const url = new URL(request.url);
 
-		if (url.pathname === '/get') {
-			const messages = await this.state.storage.get('messages');
-			return Response.json(messages ?? []);
+		if (request.method === 'OPTIONS') {
+			return json({ ok: true });
 		}
 
-		if (url.pathname === '/add' && request.method === 'POST') {
-			const body = await request.json();
-			const messages = (await this.state.storage.get('messages')) ?? [];
+		if (url.pathname === '/add-message' && request.method === 'POST') {
+			return this.addMessage(request);
+		}
 
-			messages.push({
-				...body,
-				timestamp: new Date().toISOString(),
-			});
-
-			await this.state.storage.put('messages', messages.slice(-10));
-
-			return Response.json({ ok: true });
+		if (url.pathname === '/history' && request.method === 'GET') {
+			return this.getHistory();
 		}
 
 		if (url.pathname === '/clear' && request.method === 'POST') {
-			await this.state.storage.delete('messages');
-			return Response.json({ ok: true });
+			return this.clearHistory();
 		}
 
-		return new Response('Not found', { status: 404 });
+		return json({ error: 'Durable Object route not found' }, 404);
 	}
-}
 
-export default {
-	async fetch(request, env, ctx) {
-		const url = new URL(request.url);
+	async addMessage(request) {
+		const body = await request.json().catch(() => null);
 
-		if (url.pathname === '/api/chat' && request.method === 'POST') {
-			return handleChat(request, env);
+		if (!body) {
+			return json({ error: 'Invalid JSON body' }, 400);
 		}
 
-		if (url.pathname === '/api/history' && request.method === 'GET') {
-			return getHistory(request, env);
+		const role = body.role;
+		const content = body.content;
+
+		if (!['user', 'assistant'].includes(role)) {
+			return json({ error: 'Invalid message role' }, 400);
 		}
 
-		if (url.pathname === '/api/clear' && request.method === 'POST') {
-			return clearHistory(request, env);
+		if (!content || typeof content !== 'string') {
+			return json({ error: 'Message content is required' }, 400);
 		}
 
-		return env.ASSETS.fetch(request);
-	},
-};
+		const messages = await this.getMessages();
 
-async function handleChat(request, env) {
-	try {
-		const body = await request.json();
-		const message = body.message;
-		const sessionId = body.sessionId || 'default-session';
-
-		if (!message || typeof message !== 'string') {
-			return Response.json({ error: 'Message is required.' }, { status: 400 });
-		}
-
-		const memoryObject = getMemoryObject(env, sessionId);
-
-		const memoryResponse = await memoryObject.fetch('https://memory/get');
-		const previousMessages = await memoryResponse.json();
-
-		const previousContext = previousMessages
-			.map((item, index) => {
-				return `Exchange ${index + 1}
-User: ${item.user}
-Assistant: ${item.assistant}`;
-			})
-			.join('\n\n');
-
-		const prompt = buildPrompt(message, previousContext);
-
-		const aiResponse = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
-			messages: [
-				{
-					role: 'system',
-					content:
-						"You are JobFit AI, a concise technical recruiter and resume coach. Give specific, practical, honest advice. Do not invent experience. When rewriting bullets, preserve the user's real background.",
-				},
-				{
-					role: 'user',
-					content: prompt,
-				},
-			],
-			max_tokens: 1200,
+		messages.push({
+			role,
+			content,
+			createdAt: new Date().toISOString(),
 		});
 
-		const answer = aiResponse.response || aiResponse.result || JSON.stringify(aiResponse, null, 2);
+		// Keep memory bounded so the Durable Object does not grow forever.
+		const trimmedMessages = messages.slice(-50);
 
-		await memoryObject.fetch('https://memory/add', {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				user: message,
-				assistant: answer,
-			}),
-		});
+		await this.state.storage.put('messages', trimmedMessages);
 
-		return Response.json({
-			answer,
+		return json({
+			ok: true,
+			messageCount: trimmedMessages.length,
 		});
-	} catch (error) {
-		return Response.json(
-			{
-				error: 'Something went wrong while generating the response.',
-				details: error.message,
-			},
-			{ status: 500 },
-		);
 	}
-}
 
-async function getHistory(request, env) {
-	const url = new URL(request.url);
-	const sessionId = url.searchParams.get('sessionId') || 'default-session';
-	const memoryObject = getMemoryObject(env, sessionId);
+	async getHistory() {
+		const messages = await this.getMessages();
 
-	const memoryResponse = await memoryObject.fetch('https://memory/get');
-	const history = await memoryResponse.json();
+		return json({
+			messages,
+		});
+	}
 
-	return Response.json({ history });
-}
+	async clearHistory() {
+		await this.state.storage.delete('messages');
 
-async function clearHistory(request, env) {
-	const body = await request.json().catch(() => ({}));
-	const sessionId = body.sessionId || 'default-session';
-	const memoryObject = getMemoryObject(env, sessionId);
+		return json({
+			ok: true,
+		});
+	}
 
-	await memoryObject.fetch('https://memory/clear', {
-		method: 'POST',
-	});
-
-	return Response.json({ ok: true });
-}
-
-function getMemoryObject(env, sessionId) {
-	const id = env.JOB_MEMORY.idFromName(sessionId);
-	return env.JOB_MEMORY.get(id);
-}
-
-function buildPrompt(message, previousContext) {
-	return `
-You are helping a software engineer tailor job applications.
-
-Previous conversation memory:
-${previousContext || 'No previous memory yet.'}
-
-Current user input:
-${message}
-
-Analyze the input and respond in this structure:
-
-## Fit Summary
-Give a short, honest summary of fit.
-
-## Strong Matches
-List the strongest matching skills, projects, or experiences.
-
-## Missing or Weak Areas
-List missing keywords or experience gaps.
-
-## Resume Bullet Suggestions
-Rewrite 2-4 resume bullets. Make them impact-focused, technical, and truthful.
-
-## Outreach Message
-Write a short recruiter or hiring manager message.
-
-## Next Action
-Give one concrete next step.
-`;
+	async getMessages() {
+		return (await this.state.storage.get('messages')) || [];
+	}
 }

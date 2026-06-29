@@ -16,12 +16,11 @@
 	"ai": {
 		"binding": "AI",
 	},
-
 	"durable_objects": {
 		"bindings": [
 			{
-				"name": "JOB_MEMORY",
-				"class_name": "JobMemory",
+				"name": "CHAT_SESSIONS",
+				"class_name": "ChatSession",
 			},
 		],
 	},
@@ -29,7 +28,7 @@
 	"migrations": [
 		{
 			"tag": "v1",
-			"new_classes": ["JobMemory"],
+			"new_sqlite_classes": ["ChatSession"],
 		},
 	],
 

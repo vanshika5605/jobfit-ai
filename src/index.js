@@ -8,8 +8,33 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
-export default {
-	async fetch(request, env, ctx) {
-		return new Response("Hello World!");
-	},
-};
+export class JobMemory {
+	constructor(state, env) {
+		this.state = state;
+		this.env = env;
+	}
+
+	async fetch(request) {
+		const url = new URL(request.url);
+
+		if (url.pathname === '/get') {
+			const messages = await this.state.storage.get('messages');
+			return Response.json(messages ?? []);
+		}
+
+		if (url.pathname === '/add' && request.method === 'POST') {
+			const body = await request.json();
+			const messages = (await this.state.storage.get('messages')) ?? [];
+
+			messages.push({
+				...body,
+				timestamp: new Date().toISOString(),
+			});
+
+			await this.state.storage.put('messages', messages.slice(-10));
+			return Response.json({ ok: true });
+		}
+
+		return new Response('Not found', { status: 404 });
+	}
+}

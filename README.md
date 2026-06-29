@@ -288,3 +288,5 @@ Possible extensions:
 Summary
 
 JobFit AI is a lightweight but complete AI-powered Cloudflare application. It uses a Worker as the coordination layer, Workers AI with Llama 3.3 for response generation, Durable Objects for memory, and a static chat UI for user interaction.
+
+Prompt history: https://chatgpt.com/share/6a42ca15-9718-83ea-bfc8-ba271f716f4e

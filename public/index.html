@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>JobFit AI</title>
+		<style>
+			body {
+				font-family: Arial, sans-serif;
+				background: #f5f5f5;
+				margin: 0;
+				padding: 0;
+			}
+
+			.container {
+				max-width: 900px;
+				margin: 40px auto;
+				background: white;
+				padding: 32px;
+				border-radius: 16px;
+				box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+			}
+
+			h1 {
+				margin-bottom: 8px;
+			}
+
+			.subtitle {
+				color: #555;
+				margin-bottom: 24px;
+			}
+
+			textarea {
+				width: 100%;
+				height: 220px;
+				padding: 16px;
+				font-size: 15px;
+				border: 1px solid #ccc;
+				border-radius: 12px;
+				resize: vertical;
+				box-sizing: border-box;
+			}
+
+			.buttons {
+				margin-top: 16px;
+				display: flex;
+				gap: 12px;
+			}
+
+			button {
+				padding: 12px 18px;
+				border: none;
+				border-radius: 10px;
+				cursor: pointer;
+				font-size: 15px;
+			}
+
+			.primary {
+				background: #111827;
+				color: white;
+			}
+
+			.secondary {
+				background: #e5e7eb;
+				color: #111827;
+			}
+
+			.output {
+				margin-top: 28px;
+				background: #f9fafb;
+				border: 1px solid #e5e7eb;
+				border-radius: 12px;
+				padding: 20px;
+				white-space: pre-wrap;
+				line-height: 1.5;
+			}
+
+			.history {
+				margin-top: 28px;
+				font-size: 14px;
+				color: #444;
+			}
+
+			.loading {
+				color: #666;
+				margin-top: 16px;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="container">
+			<h1>JobFit AI</h1>
+			<p class="subtitle">Paste a job description and get AI-powered resume tailoring, fit analysis, and outreach suggestions.</p>
+
+			<textarea
+				id="message"
+				placeholder="Paste a job description or ask something like: Analyze this role and tailor my resume bullets..."
+			></textarea>
+
+			<div class="buttons">
+				<button class="primary" onclick="sendMessage()">Analyze</button>
+				<button class="secondary" onclick="loadHistory()">Show Memory</button>
+				<button class="secondary" onclick="clearMemory()">Clear Memory</button>
+			</div>
+
+			<div id="loading" class="loading"></div>
+			<div id="output" class="output">Your AI response will appear here.</div>
+			<div id="history" class="history"></div>
+		</div>
+
+		<script>
+			const sessionId = localStorage.getItem('jobfit-session-id') || crypto.randomUUID();
+			localStorage.setItem('jobfit-session-id', sessionId);
+
+			async function sendMessage() {
+				const message = document.getElementById('message').value;
+				const output = document.getElementById('output');
+				const loading = document.getElementById('loading');
+
+				if (!message.trim()) {
+					output.textContent = 'Please paste a job description or question first.';
+					return;
+				}
+
+				loading.textContent = 'Analyzing with Workers AI...';
+				output.textContent = '';
+
+				try {
+					const response = await fetch('/api/chat', {
+						method: 'POST',
+						headers: {
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify({
+							message,
+							sessionId,
+						}),
+					});
+
+					const data = await response.json();
+
+					if (!response.ok) {
+						output.textContent = data.error || 'Something went wrong.';
+					} else {
+						output.textContent = data.answer;
+					}
+				} catch (error) {
+					output.textContent = 'Request failed: ' + error.message;
+				} finally {
+					loading.textContent = '';
+				}
+			}
+
+			async function loadHistory() {
+				const historyDiv = document.getElementById('history');
+				historyDiv.textContent = 'Loading memory...';
+
+				const response = await fetch(`/api/history?sessionId=${sessionId}`);
+				const data = await response.json();
+
+				if (!data.history || data.history.length === 0) {
+					historyDiv.textContent = 'No memory stored yet.';
+					return;
+				}
+
+				historyDiv.innerHTML =
+					'<h3>Memory</h3>' +
+					data.history
+						.map((item, index) => {
+							return `
+								<div>
+									<strong>Exchange ${index + 1}</strong><br/>
+									<strong>User:</strong> ${escapeHtml(item.user).slice(0, 300)}...
+								</div>
+								<hr/>
+							`;
+						})
+						.join('');
+			}
+
+			async function clearMemory() {
+				await fetch('/api/clear', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({ sessionId }),
+				});
+
+				document.getElementById('history').textContent = 'Memory cleared.';
+				document.getElementById('output').textContent = 'Memory cleared. Start a new analysis.';
+			}
+
+			function escapeHtml(str) {
+				return str
+					.replaceAll('&', '&amp;')
+					.replaceAll('<', '&lt;')
+					.replaceAll('>', '&gt;')
+					.replaceAll('"', '&quot;')
+					.replaceAll("'", '&#039;');
+			}
+		</script>
+	</body>
+</html>
